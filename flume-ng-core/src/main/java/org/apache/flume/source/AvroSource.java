@@ -32,6 +32,8 @@ import java.util.concurrent.TimeUnit;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.avro.ipc.NettyServer;
@@ -138,6 +140,10 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
   private static final String KEYSTORE_KEY = "keystore";
   private static final String KEYSTORE_PASSWORD_KEY = "keystore-password";
   private static final String KEYSTORE_TYPE_KEY = "keystore-type";
+  private static final String TRUSTSTORE_KEY = "truststore";
+  private static final String TRUSTSTORE_PASSWORD_KEY = "truststore-password";
+  private static final String TRUSTSTORE_TYPE_KEY = "truststore-type";
+  private static final String CLIENTAUTH_KEY = "client-auth";
   private static final String EXCLUDE_PROTOCOLS = "exclude-protocols";
   private int port;
   private String bindAddress;
@@ -145,6 +151,11 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
   private String keystore;
   private String keystorePassword;
   private String keystoreType;
+  private boolean wantClientAuth = false;
+  private boolean needClientAuth = false;
+  private String truststore;
+  private String truststorePassword;
+  private String truststoreType;
   private final List<String> excludeProtocols = new LinkedList<String>();
   private boolean enableSsl = false;
   private boolean enableIpFilter;
@@ -177,6 +188,20 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
     keystore = context.getString(KEYSTORE_KEY);
     keystorePassword = context.getString(KEYSTORE_PASSWORD_KEY);
     keystoreType = context.getString(KEYSTORE_TYPE_KEY, "JKS");
+    String clientAuth = context.getString(CLIENTAUTH_KEY, "none");
+    if (clientAuth.equals("need")) {
+      needClientAuth = true;
+      wantClientAuth = false;
+    } else if (clientAuth.equals("want")) {
+      wantClientAuth = true;
+      needClientAuth = false;
+    } else {
+      wantClientAuth = false;
+      needClientAuth = false;
+    }
+    truststore = context.getString(TRUSTSTORE_KEY);
+    truststorePassword = context.getString(TRUSTSTORE_PASSWORD_KEY);
+    truststoreType = context.getString(TRUSTSTORE_TYPE_KEY, "JKS");
     String excludeProtocolsStr = context.getString(EXCLUDE_PROTOCOLS);
     if (excludeProtocolsStr == null) {
       excludeProtocols.add("SSLv3");
@@ -198,6 +223,19 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
       } catch (Exception ex) {
         throw new FlumeException(
             "Avro source configured with invalid keystore: " + keystore, ex);
+      }
+    }
+    if (enableSsl && (wantClientAuth || needClientAuth)) {
+      Preconditions.checkNotNull(truststore,
+          TRUSTSTORE_KEY + " must be specified when SSL Client Authentication is enabled");
+      Preconditions.checkNotNull(truststorePassword,
+          TRUSTSTORE_PASSWORD_KEY + " must be specified when SSL Client Authentication is enabled");
+      try {
+        KeyStore ts = KeyStore.getInstance(truststoreType);
+        ts.load(new FileInputStream(truststore), truststorePassword.toCharArray());
+      } catch (Exception ex) {
+        throw new FlumeException(
+            "Avro source configured with invalid truststore: " + truststore, ex);
       }
     }
 
@@ -283,6 +321,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
       pipelineFactory = new AdvancedChannelPipelineFactory(
         enableCompression, enableSsl, keystore,
         keystorePassword, keystoreType, enableIpFilter,
+        wantClientAuth, needClientAuth, truststore, truststorePassword, truststoreType,
         patternRuleConfigDefinition);
     } else {
       pipelineFactory = new ChannelPipelineFactory() {
@@ -453,6 +492,11 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
     private String keystore;
     private String keystorePassword;
     private String keystoreType;
+    private boolean wantClientAuth;
+    private boolean needClientAuth;
+    private String truststore;
+    private String truststorePassword;
+    private String truststoreType;
 
     private boolean enableIpFilter;
     private String patternRuleConfigDefinition;
@@ -460,6 +504,8 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
     public AdvancedChannelPipelineFactory(boolean enableCompression,
       boolean enableSsl, String keystore, String keystorePassword,
       String keystoreType, boolean enableIpFilter,
+      boolean wantClientAuth, boolean needClientAuth, String truststore,
+      String truststorePassword, String truststoreType,
       String patternRuleConfigDefinition) {
       this.enableCompression = enableCompression;
       this.enableSsl = enableSsl;
@@ -467,6 +513,11 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
       this.keystorePassword = keystorePassword;
       this.keystoreType = keystoreType;
       this.enableIpFilter = enableIpFilter;
+      this.wantClientAuth = wantClientAuth;
+      this.needClientAuth = needClientAuth;
+      this.truststore = truststore;
+      this.truststorePassword = truststorePassword;
+      this.truststoreType = truststoreType;
       this.patternRuleConfigDefinition = patternRuleConfigDefinition;
     }
 
@@ -479,12 +530,22 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(getAlgorithm());
         kmf.init(ks, keystorePassword.toCharArray());
 
+        TrustManager[] trustManagers = null;
+        if (wantClientAuth || needClientAuth) {
+          KeyStore ts = KeyStore.getInstance(truststoreType);
+          ts.load(new FileInputStream(truststore), truststorePassword.toCharArray());
+
+          TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+          tmf.init(ts);
+          trustManagers = tmf.getTrustManagers();
+        }
         SSLContext serverContext = SSLContext.getInstance("TLS");
-        serverContext.init(kmf.getKeyManagers(), null, null);
+        serverContext.init(kmf.getKeyManagers(), trustManagers, null);
         return serverContext;
       } catch (Exception e) {
         throw new Error("Failed to initialize the server-side SSLContext", e);
       }
+
     }
 
     private String getAlgorithm() {
@@ -509,6 +570,15 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
       if (enableSsl) {
         SSLEngine sslEngine = createServerSSLContext().createSSLEngine();
         sslEngine.setUseClientMode(false);
+        // these are 'mutually' set-able, so we only set the one we actually want
+        if (wantClientAuth) {
+          sslEngine.setWantClientAuth(wantClientAuth);
+        } else if (needClientAuth) {
+          sslEngine.setNeedClientAuth(needClientAuth);
+        } else {
+          sslEngine.setWantClientAuth(false);
+          sslEngine.setNeedClientAuth(false);
+        }
         List<String> enabledProtocols = new ArrayList<String>();
         for (String protocol : sslEngine.getEnabledProtocols()) {
           if (!excludeProtocols.contains(protocol)) {
