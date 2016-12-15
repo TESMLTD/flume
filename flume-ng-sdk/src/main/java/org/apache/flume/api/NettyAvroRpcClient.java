@@ -48,6 +48,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.TrustManager;
@@ -96,6 +98,10 @@ implements RpcClient {
   private String truststore;
   private String truststorePassword;
   private String truststoreType;
+  private boolean enableClientAuth = false;
+  private String keystore;
+  private String keystorePassword;
+  private String keystoreType;
   private final List<String> excludeProtocols = new LinkedList<String>();
 
   private Transceiver transceiver;
@@ -147,12 +153,14 @@ implements RpcClient {
             bossExecutor, workerExecutor,
             enableDeflateCompression, enableSsl, trustAllCerts,
             compressionLevel, truststore, truststorePassword, truststoreType,
+            enableClientAuth, keystore, keystorePassword, keystoreType,
             excludeProtocols, maxIoWorkers);
         } else {
           socketChannelFactory = new SSLCompressionChannelFactory(
             bossExecutor, workerExecutor,
             enableDeflateCompression, enableSsl, trustAllCerts,
             compressionLevel, truststore, truststorePassword, truststoreType,
+            enableClientAuth, keystore, keystorePassword, keystoreType,
             excludeProtocols);
         }
       } else {
@@ -607,6 +615,15 @@ implements RpcClient {
         RpcClientConfigurationConstants.CONFIG_TRUSTSTORE_PASSWORD);
     truststoreType = properties.getProperty(
         RpcClientConfigurationConstants.CONFIG_TRUSTSTORE_TYPE, "JKS");
+    enableClientAuth = Boolean.parseBoolean(properties.getProperty(
+        RpcClientConfigurationConstants.CONFIG_CLIENTAUTH));
+    keystore = properties.getProperty(
+        RpcClientConfigurationConstants.CONFIG_KEYSTORE);
+    keystorePassword = properties.getProperty(
+        RpcClientConfigurationConstants.CONFIG_KEYSTORE_PASSWORD);
+    keystoreType = properties.getProperty(
+        RpcClientConfigurationConstants.CONFIG_KEYSTORE_TYPE, "JKS");
+
     String excludeProtocolsStr = properties.getProperty(
       RpcClientConfigurationConstants.CONFIG_EXCLUDE_PROTOCOLS);
     if (excludeProtocolsStr == null) {
@@ -683,12 +700,18 @@ implements RpcClient {
     private final String truststore;
     private final String truststorePassword;
     private final String truststoreType;
+    private final boolean enableClientAuth;
+    private final String keystore;
+    private final String keystorePassword;
+    private final String keystoreType;
     private final List<String> excludeProtocols;
 
     public SSLCompressionChannelFactory(Executor bossExecutor, Executor workerExecutor,
         boolean enableCompression, boolean enableSsl, boolean trustAllCerts,
         int compressionLevel, String truststore, String truststorePassword,
-        String truststoreType, List<String> excludeProtocols) {
+        String truststoreType,
+        boolean enableClientAuth, String keystore, String keystorePassword,
+        String keystoreType, List<String> excludeProtocols) {
       super(bossExecutor, workerExecutor);
       this.enableCompression = enableCompression;
       this.enableSsl = enableSsl;
@@ -697,13 +720,19 @@ implements RpcClient {
       this.truststore = truststore;
       this.truststorePassword = truststorePassword;
       this.truststoreType = truststoreType;
+      this.enableClientAuth = enableClientAuth;
+      this.keystore = keystore;
+      this.keystorePassword = keystorePassword;
+      this.keystoreType = keystoreType;
       this.excludeProtocols = excludeProtocols;
     }
 
     public SSLCompressionChannelFactory(Executor bossExecutor, Executor workerExecutor,
         boolean enableCompression, boolean enableSsl, boolean trustAllCerts,
         int compressionLevel, String truststore, String truststorePassword,
-        String truststoreType, List<String> excludeProtocols, int maxIOWorkers) {
+        String truststoreType,
+        boolean enableClientAuth, String keystore, String keystorePassword,
+        String keystoreType, List<String> excludeProtocols, int maxIOWorkers) {
       super(bossExecutor, workerExecutor, maxIOWorkers);
       this.enableCompression = enableCompression;
       this.enableSsl = enableSsl;
@@ -712,12 +741,16 @@ implements RpcClient {
       this.truststore = truststore;
       this.truststorePassword = truststorePassword;
       this.truststoreType = truststoreType;
+      this.enableClientAuth = enableClientAuth;
+      this.keystore = keystore;
+      this.keystorePassword = keystorePassword;
+      this.keystoreType = keystoreType;
       this.excludeProtocols = excludeProtocols;
     }
 
     @Override
     public SocketChannel newChannel(ChannelPipeline pipeline) {
-      TrustManager[] managers;
+      TrustManager[] trustManagers;
       try {
         if (enableCompression) {
           ZlibEncoder encoder = new ZlibEncoder(compressionLevel);
@@ -725,31 +758,45 @@ implements RpcClient {
           pipeline.addFirst("inflater", new ZlibDecoder());
         }
         if (enableSsl) {
+          KeyManager[] keyManagers = null;
           if (trustAllCerts) {
             logger.warn("No truststore configured, setting TrustManager to accept"
                 + " all server certificates");
-            managers = new TrustManager[] { new PermissiveTrustManager() };
+            trustManagers = new TrustManager[] { new PermissiveTrustManager() };
           } else {
-            KeyStore keystore = null;
+            KeyStore ts = null;
 
             if (truststore != null) {
               if (truststorePassword == null) {
                 throw new NullPointerException("truststore password is null");
               }
               InputStream truststoreStream = new FileInputStream(truststore);
-              keystore = KeyStore.getInstance(truststoreType);
-              keystore.load(truststoreStream, truststorePassword.toCharArray());
+              ts = KeyStore.getInstance(truststoreType);
+              ts.load(truststoreStream, truststorePassword.toCharArray());
+            }
+            if (enableClientAuth) {
+              if (keystore != null) {
+                if (keystorePassword == null) {
+                  throw new NullPointerException("keystore password is null");
+                }
+                InputStream keystoreStream = new FileInputStream(keystore);
+                KeyStore ks = KeyStore.getInstance(keystoreType);
+                ks.load(keystoreStream, keystorePassword.toCharArray());
+                KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+                kmf.init(ks, keystorePassword.toCharArray());
+                keyManagers = kmf.getKeyManagers();
+              }
             }
 
             TrustManagerFactory tmf = TrustManagerFactory.getInstance("SunX509");
             // null keystore is OK, with SunX509 it defaults to system CA Certs
             // see http://docs.oracle.com/javase/6/docs/technotes/guides/security/jsse/JSSERefGuide.html#X509TrustManager
-            tmf.init(keystore);
-            managers = tmf.getTrustManagers();
+            tmf.init(ts);
+            trustManagers = tmf.getTrustManagers();
           }
 
           SSLContext sslContext = SSLContext.getInstance("TLS");
-          sslContext.init(null, managers, null);
+          sslContext.init(keyManagers, trustManagers, null);
           SSLEngine sslEngine = sslContext.createSSLEngine();
           sslEngine.setUseClientMode(true);
           List<String> enabledProtocols = new ArrayList<String>();
