@@ -19,22 +19,30 @@
 
 package org.apache.flume.source;
 
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.Executors;
+
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
+import org.apache.avro.AvroRemoteException;
 import org.apache.avro.ipc.NettyTransceiver;
 import org.apache.avro.ipc.specific.SpecificRequestor;
 import org.apache.flume.Channel;
@@ -274,18 +282,151 @@ public class TestAvroSource {
 
   @Test
   public void testSslRequest() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("keystore", "src/test/resources/server.p12");
+    context.put("keystore-password", "password");
+    context.put("keystore-type", "PKCS12");
+    prepareSslServer(context);
+
+    doSslRequest(true, null);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthNeededSent() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "need");
+    context.put("keystore", "src/test/resources/server_n.p12");
+    context.put("keystore-password", "password");
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
+    context.put("truststore-password",  "password");
+    prepareSslServer(context);
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+            selectedPort), new SSLChannelFactory(
+                "src/test/resources/client-keystore.jks", "password", "JKS", /* not signed by root-ca-cert */
+                "src/test/resources/root-ca-cert.jks", "password", "JKS")));
+
+    doSslRequest(true, client);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthNeededMissing() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "need");
+    context.put("keystore", "src/test/resources/server_n.p12");
+    context.put("keystore-password", "password");
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
+    context.put("truststore-password",  "password");
+
+    prepareSslServer(context);
+    doSslRequest(false, null);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthNeededInvalid() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "need");
+    context.put("keystore", "src/test/resources/server_n.p12");
+    context.put("keystore-password", "password");
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
+    context.put("truststore-password",  "password");
+    prepareSslServer(context);
+
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+            selectedPort), new SSLChannelFactory(
+                "src/test/resources/keystorefile.jks", "password", "JKS", /* not signed by root-ca-cert */
+                "src/test/resources/root-ca-cert.jks", "password", "JKS")));
+
+    doSslRequest(false, client);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedSent() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", "src/test/resources/server_n.p12");
+    context.put("keystore-password", "password");
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
+    context.put("truststore-password",  "password");
+    prepareSslServer(context);
+
+    /** client auth supplied - "want" should accept the connection */
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+        selectedPort), new SSLChannelFactory(
+            "src/test/resources/client-keystore.jks", "password", "JKS",
+            "src/test/resources/root-ca-cert.jks", "password", "JKS")));
+
+    doSslRequest(true, client);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedMissing() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", "src/test/resources/server_n.p12");
+    context.put("keystore-password", "password");
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
+    context.put("truststore-password",  "password");
+    prepareSslServer(context);
+
+    doSslRequest(true, null);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedInvalid() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", "src/test/resources/server_n.p12");
+    context.put("keystore-password", "password");
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
+    context.put("truststore-password",  "password");
+    prepareSslServer(context);
+
+    /** incorrect client auth supplied - "want" should still accept the connection */
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+            selectedPort), new SSLChannelFactory(
+                "src/test/resources/keystorefile.jks", "password", "JKS", /* not signed by root-ca-cert */
+                "src/test/resources/root-ca-cert.jks", "password", "JKS")));
+
+    doSslRequest(true, client);
+  }
+
+  private void prepareSslServer(Context context) throws InterruptedException {
     boolean bound = false;
 
     for (int i = 0; i < 10 && !bound; i++) {
       try {
-        Context context = new Context();
-
         context.put("port", String.valueOf(selectedPort = 41414 + i));
-        context.put("bind", "0.0.0.0");
-        context.put("ssl", "true");
-        context.put("keystore", "src/test/resources/server.p12");
-        context.put("keystore-password", "password");
-        context.put("keystore-type", "PKCS12");
 
         Configurables.configure(source, context);
 
@@ -299,60 +440,127 @@ public class TestAvroSource {
         Thread.sleep(100);
       }
     }
+  }
 
+  private void doSslRequest(boolean successExpected, AvroSourceProtocol client) throws InterruptedException, IOException {
     Assert
-        .assertTrue("Reached start or error", LifecycleController.waitForOneOf(
-            source, LifecycleState.START_OR_ERROR));
+    .assertTrue("Reached start or error", LifecycleController.waitForOneOf(
+        source, LifecycleState.START_OR_ERROR));
     Assert.assertEquals("Server is started", LifecycleState.START,
         source.getLifecycleState());
 
-    AvroSourceProtocol client = SpecificRequestor.getClient(
-        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
-        selectedPort), new SSLChannelFactory()));
+    if (client == null) {
+      client = SpecificRequestor.getClient(
+          AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+              selectedPort), new SSLChannelFactory()));
+    }
 
     AvroFlumeEvent avroEvent = new AvroFlumeEvent();
 
     avroEvent.setHeaders(new HashMap<CharSequence, CharSequence>());
     avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
 
-    Status status = client.append(avroEvent);
+    boolean sent = false;
+    Status status = Status.UNKNOWN;
+    try {
+      status = client.append(avroEvent);
+      sent = true;
+    } catch (AvroRemoteException ex) {
+      logger.info("Failed to send event", ex);
+    }
 
-    Assert.assertEquals(Status.OK, status);
+    if (successExpected) {
+      Assert.assertEquals(Status.OK, status);
+    } else {
+      Assert.assertNotEquals(Status.OK, status);
+    }
 
     Transaction transaction = channel.getTransaction();
     transaction.begin();
 
     Event event = channel.take();
-    Assert.assertNotNull(event);
-    Assert.assertEquals("Channel contained our event", "Hello avro ssl",
-        new String(event.getBody()));
+    if (successExpected) {
+      Assert.assertNotNull(event);
+      Assert.assertEquals("Channel contained our event", "Hello avro ssl",
+          new String(event.getBody()));
+      logger.debug("Round trip event:{}", event);
+    } else {
+      Assert.assertNull(event);
+    }
+
     transaction.commit();
     transaction.close();
 
-    logger.debug("Round trip event:{}", event);
-
     source.stop();
     Assert.assertTrue("Reached stop or error",
-        LifecycleController.waitForOneOf(source, LifecycleState.STOP_OR_ERROR));
+        LifecycleController.waitForOneOf(source, LifecycleState.STOP_OR_ERROR, 5000));
     Assert.assertEquals("Server is stopped", LifecycleState.STOP,
         source.getLifecycleState());
-  }
 
+    if (!successExpected && sent) {
+      Assert.fail("SSL-enabled source successfully accepted from client with an untrusted certificate when it should have failed");
+    }
+  }
   /**
    * Factory of SSL-enabled client channels
    * Copied from Avro's org.apache.avro.ipc.TestNettyServerWithSSL test
    */
   private static class SSLChannelFactory extends NioClientSocketChannelFactory {
+    private boolean testClientAuth;
+    private String keystore;
+    private String keystorePassword;
+    private String keystoreType;
+    private String truststore;
+    private String truststorePassword;
+    private String truststoreType;
+
     public SSLChannelFactory() {
       super(Executors.newCachedThreadPool(), Executors.newCachedThreadPool());
+    }
+
+    public SSLChannelFactory(String keystore, String keystorePassword, String keystoreType,
+        String truststore, String truststorePassword, String truststoreType) {
+      super(Executors.newCachedThreadPool(), Executors.newCachedThreadPool());
+      testClientAuth = true;
+      this.keystore = keystore;
+      this.keystorePassword = keystorePassword;
+      this.keystoreType = keystoreType;
+      this.truststore = truststore;
+      this.truststorePassword = truststorePassword;
+      this.truststoreType = truststoreType;
     }
 
     @Override
     public SocketChannel newChannel(ChannelPipeline pipeline) {
       try {
+        KeyManager[] keyManagers = null;
+        TrustManager[] trustManagers = new TrustManager[]{new PermissiveTrustManager()};
+        if (testClientAuth) {
+          if (truststore != null) {
+            if (truststorePassword == null) {
+              throw new RuntimeException("truststore password is null");
+            }
+            InputStream truststoreStream = new FileInputStream(truststore);
+            KeyStore ts = KeyStore.getInstance(truststoreType);
+            ts.load(truststoreStream, truststorePassword.toCharArray());
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance("SunX509");
+            tmf.init(ts);
+            trustManagers = tmf.getTrustManagers();
+          }
+          if (keystore != null) {
+            if (keystorePassword == null) {
+              throw new RuntimeException("keystore password is null");
+            }
+            InputStream keystoreStream = new FileInputStream(keystore);
+            KeyStore ks = KeyStore.getInstance(keystoreType);
+            ks.load(keystoreStream, keystorePassword.toCharArray());
+            KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+            kmf.init(ks, keystorePassword.toCharArray());
+            keyManagers = kmf.getKeyManagers();
+          }
+        }
         SSLContext sslContext = SSLContext.getInstance("TLS");
-        sslContext.init(null, new TrustManager[]{new PermissiveTrustManager()},
-                        null);
+        sslContext.init(keyManagers, trustManagers, null);
         SSLEngine sslEngine = sslContext.createSSLEngine();
         sslEngine.setUseClientMode(true);
         // addFirst() will make SSL handling the first stage of decoding
