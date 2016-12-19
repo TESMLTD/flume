@@ -75,6 +75,21 @@ import org.slf4j.LoggerFactory;
 
 public class TestAvroSource {
 
+  /* key, self signed for "CN=localhost, ..." */
+  private static final String RESOURCES_SERVER_SELF_SIGNED_KEY_P12 = "src/test/resources/server.p12";
+  /* key, self signed for "CN=unknown, ..." */
+  private static final String RESOURCES_SERVER_SELF_SIGNED_KEYSTORE = "src/test/resources/keystorefile.jks";
+
+  /* keys with certs signed by "root-ca" key */
+  private static final String RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12 = "src/test/resources/server_n.p12";
+  private static final String RESOURCES_CLIENT_SIGNED_KEYSTORE = "src/test/resources/client-keystore.jks";
+  private static final String CLIENT_KEY_DN = "CN=Client, OU=OpsDirector, O=TESM Limited, L=London, ST=London, C=GB";
+
+  /* the "root-ca" certificate */
+  private static final String RESOURCES_ROOT_CA_CERT_KEYSTORE = "src/test/resources/root-ca-cert.jks";
+
+  private static final String KEYSTORE_PASSWORD = "password";
+
   private static final Logger logger = LoggerFactory
       .getLogger(TestAvroSource.class);
 
@@ -178,7 +193,24 @@ public class TestAvroSource {
     doRequest(false, true, 6);
   }
 
-  private void doRequest(boolean serverEnableCompression, boolean clientEnableCompression, int compressionLevel) throws InterruptedException, IOException {
+  @Test
+  public void testRequestCannotSetEventSslDnHeader() throws InterruptedException, IOException {
+    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+
+    HashMap<CharSequence, CharSequence> headers = new HashMap<CharSequence, CharSequence>();
+    headers.put("ssl-dn", "my own value");
+    avroEvent.setHeaders(headers);
+    avroEvent.setBody(ByteBuffer.wrap("Hello avro".getBytes()));
+
+    Event event = doRequest(false, false, 6, avroEvent);
+    Assert.assertNull(event.getHeaders().get("ssl-dn"));
+  }
+
+  private Event doRequest(boolean serverEnableCompression, boolean clientEnableCompression, int compressionLevel) throws InterruptedException, IOException {
+    return doRequest(serverEnableCompression, clientEnableCompression, compressionLevel, null);
+  }
+
+  private Event doRequest(boolean serverEnableCompression, boolean clientEnableCompression, int compressionLevel, AvroFlumeEvent avroEvent) throws InterruptedException, IOException {
     boolean bound = false;
 
     for (int i = 0; i < 100 && !bound; i++) {
@@ -227,10 +259,12 @@ public class TestAvroSource {
           AvroSourceProtocol.class, nettyTransceiver);
     }
 
-    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+    if (avroEvent == null) {
+      avroEvent = new AvroFlumeEvent();
 
-    avroEvent.setHeaders(new HashMap<CharSequence, CharSequence>());
-    avroEvent.setBody(ByteBuffer.wrap("Hello avro".getBytes()));
+      avroEvent.setHeaders(new HashMap<CharSequence, CharSequence>());
+      avroEvent.setBody(ByteBuffer.wrap("Hello avro".getBytes()));
+    }
 
     Status status = client.append(avroEvent);
 
@@ -255,6 +289,8 @@ public class TestAvroSource {
         LifecycleController.waitForOneOf(source, LifecycleState.STOP_OR_ERROR));
     Assert.assertEquals("Server is stopped", LifecycleState.STOP,
         source.getLifecycleState());
+
+    return event;
   }
 
   private static class CompressionChannelFactory extends
@@ -286,8 +322,8 @@ public class TestAvroSource {
 
     context.put("bind", "0.0.0.0");
     context.put("ssl", "true");
-    context.put("keystore", "src/test/resources/server.p12");
-    context.put("keystore-password", "password");
+    context.put("keystore", RESOURCES_SERVER_SELF_SIGNED_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
     context.put("keystore-type", "PKCS12");
     prepareSslServer(context);
 
@@ -301,19 +337,139 @@ public class TestAvroSource {
     context.put("bind", "0.0.0.0");
     context.put("ssl", "true");
     context.put("client-auth", "need");
-    context.put("keystore", "src/test/resources/server_n.p12");
-    context.put("keystore-password", "password");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
     context.put("keystore-type", "PKCS12");
-    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
-    context.put("truststore-password",  "password");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
     prepareSslServer(context);
     AvroSourceProtocol client = SpecificRequestor.getClient(
         AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
             selectedPort), new SSLChannelFactory(
-                "src/test/resources/client-keystore.jks", "password", "JKS", /* not signed by root-ca-cert */
-                "src/test/resources/root-ca-cert.jks", "password", "JKS")));
+                RESOURCES_CLIENT_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+                RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
 
     doSslRequest(true, client);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthSetsEventSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "need");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+            selectedPort), new SSLChannelFactory(
+                RESOURCES_CLIENT_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+                RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
+
+    Event event = doSslRequest(true, client);
+    Assert.assertEquals(CLIENT_KEY_DN, event.getHeaders().get("ssl-dn"));
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthBatchSetsEventSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "need");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+            selectedPort), new SSLChannelFactory(
+                RESOURCES_CLIENT_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+                RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
+
+    List<AvroFlumeEvent> avroEvents = new ArrayList<AvroFlumeEvent>();
+    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+    avroEvent.setHeaders(new HashMap<CharSequence, CharSequence>());
+    avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
+    avroEvents.add(avroEvent);
+    avroEvents.add(avroEvent);
+
+    List<Event> events = doSslRequestList(true, client, avroEvents);
+    Assert.assertEquals(CLIENT_KEY_DN, events.get(0).getHeaders().get("ssl-dn"));
+    Assert.assertEquals(CLIENT_KEY_DN, events.get(1).getHeaders().get("ssl-dn"));
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthCannotOverrideSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "need");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+            selectedPort), new SSLChannelFactory(
+                RESOURCES_CLIENT_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+                RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
+
+    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+    HashMap<CharSequence, CharSequence> headers = new HashMap<CharSequence, CharSequence>();
+    headers.put("ssl-dn", "my own value");
+    avroEvent.setHeaders(headers);
+    avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
+
+    Event event = doSslRequest(true, client, avroEvent);
+    Assert.assertEquals(CLIENT_KEY_DN, event.getHeaders().get("ssl-dn"));
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthBatchCannotOverrideEventSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "need");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+            selectedPort), new SSLChannelFactory(
+                RESOURCES_CLIENT_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+                RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
+
+    List<AvroFlumeEvent> avroEvents = new ArrayList<AvroFlumeEvent>();
+    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+    HashMap<CharSequence, CharSequence> headers = new HashMap<CharSequence, CharSequence>();
+    headers.put("ssl-dn", "my own value");
+    avroEvent.setHeaders(headers);
+    avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
+    avroEvents.add(avroEvent);
+    avroEvents.add(avroEvent);
+
+    List<Event> events = doSslRequestList(true, client, avroEvents);
+    Assert.assertEquals(CLIENT_KEY_DN, events.get(0).getHeaders().get("ssl-dn"));
+    Assert.assertEquals(CLIENT_KEY_DN, events.get(1).getHeaders().get("ssl-dn"));
   }
 
   @Test
@@ -323,11 +479,11 @@ public class TestAvroSource {
     context.put("bind", "0.0.0.0");
     context.put("ssl", "true");
     context.put("client-auth", "need");
-    context.put("keystore", "src/test/resources/server_n.p12");
-    context.put("keystore-password", "password");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
     context.put("keystore-type", "PKCS12");
-    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
-    context.put("truststore-password",  "password");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
 
     prepareSslServer(context);
     doSslRequest(false, null);
@@ -340,18 +496,18 @@ public class TestAvroSource {
     context.put("bind", "0.0.0.0");
     context.put("ssl", "true");
     context.put("client-auth", "need");
-    context.put("keystore", "src/test/resources/server_n.p12");
-    context.put("keystore-password", "password");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
     context.put("keystore-type", "PKCS12");
-    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
-    context.put("truststore-password",  "password");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
     prepareSslServer(context);
 
     AvroSourceProtocol client = SpecificRequestor.getClient(
         AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
             selectedPort), new SSLChannelFactory(
-                "src/test/resources/keystorefile.jks", "password", "JKS", /* not signed by root-ca-cert */
-                "src/test/resources/root-ca-cert.jks", "password", "JKS")));
+                RESOURCES_SERVER_SELF_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+                RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
 
     doSslRequest(false, client);
   }
@@ -363,21 +519,46 @@ public class TestAvroSource {
     context.put("bind", "0.0.0.0");
     context.put("ssl", "true");
     context.put("client-auth", "want");
-    context.put("keystore", "src/test/resources/server_n.p12");
-    context.put("keystore-password", "password");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
     context.put("keystore-type", "PKCS12");
-    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
-    context.put("truststore-password",  "password");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
     prepareSslServer(context);
 
     /** client auth supplied - "want" should accept the connection */
     AvroSourceProtocol client = SpecificRequestor.getClient(
         AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
         selectedPort), new SSLChannelFactory(
-            "src/test/resources/client-keystore.jks", "password", "JKS",
-            "src/test/resources/root-ca-cert.jks", "password", "JKS")));
+            RESOURCES_CLIENT_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+            RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
 
     doSslRequest(true, client);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedSetsSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    /** client auth supplied - "want" should accept the connection and record the certificate provided */
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+        selectedPort), new SSLChannelFactory(
+            RESOURCES_CLIENT_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+            RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
+
+    Event event = doSslRequest(true, client);
+    Assert.assertEquals(CLIENT_KEY_DN, event.getHeaders().get("ssl-dn"));
   }
 
   @Test
@@ -387,14 +568,110 @@ public class TestAvroSource {
     context.put("bind", "0.0.0.0");
     context.put("ssl", "true");
     context.put("client-auth", "want");
-    context.put("keystore", "src/test/resources/server_n.p12");
-    context.put("keystore-password", "password");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
     context.put("keystore-type", "PKCS12");
-    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
-    context.put("truststore-password",  "password");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
     prepareSslServer(context);
 
     doSslRequest(true, null);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedMissingDoesNotSetSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    Event event = doSslRequest(true, null);
+    Assert.assertNull(event.getHeaders().get("ssl-dn"));
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedMissingCannotOverrideSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+    HashMap<CharSequence, CharSequence> headers = new HashMap<CharSequence, CharSequence>();
+    headers.put("ssl-dn", "my own value");
+    avroEvent.setHeaders(headers);
+    avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
+
+    Event event = doSslRequest(true, null, avroEvent);
+    Assert.assertNull(event.getHeaders().get("ssl-dn"));
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedMissingBatchDoesNotSetSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    List<AvroFlumeEvent> avroEvents = new ArrayList<AvroFlumeEvent>();
+    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+    avroEvent.setHeaders(new HashMap<CharSequence, CharSequence>());
+    avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
+    avroEvents.add(avroEvent);
+    avroEvents.add(avroEvent);
+
+    List<Event> event = doSslRequestList(true, null, avroEvents);
+    Assert.assertNull(event.get(0).getHeaders().get("ssl-dn"));
+    Assert.assertNull(event.get(1).getHeaders().get("ssl-dn"));
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedMissingBatchCannotOverrideSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    List<AvroFlumeEvent> avroEvents = new ArrayList<AvroFlumeEvent>();
+    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+    HashMap<CharSequence, CharSequence> headers = new HashMap<CharSequence, CharSequence>();
+    headers.put("ssl-dn", "my own value");
+    avroEvent.setHeaders(headers);
+    avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
+    avroEvents.add(avroEvent);
+    avroEvents.add(avroEvent);
+
+    List<Event> event = doSslRequestList(true, null, avroEvents);
+    Assert.assertNull(event.get(0).getHeaders().get("ssl-dn"));
+    Assert.assertNull(event.get(1).getHeaders().get("ssl-dn"));
   }
 
   @Test
@@ -404,21 +681,46 @@ public class TestAvroSource {
     context.put("bind", "0.0.0.0");
     context.put("ssl", "true");
     context.put("client-auth", "want");
-    context.put("keystore", "src/test/resources/server_n.p12");
-    context.put("keystore-password", "password");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
     context.put("keystore-type", "PKCS12");
-    context.put("truststore",  "src/test/resources/root-ca-cert.jks");
-    context.put("truststore-password",  "password");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
     prepareSslServer(context);
 
     /** incorrect client auth supplied - "want" should still accept the connection */
     AvroSourceProtocol client = SpecificRequestor.getClient(
         AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
             selectedPort), new SSLChannelFactory(
-                "src/test/resources/keystorefile.jks", "password", "JKS", /* not signed by root-ca-cert */
-                "src/test/resources/root-ca-cert.jks", "password", "JKS")));
+                RESOURCES_SERVER_SELF_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+                RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
 
     doSslRequest(true, client);
+  }
+
+  @Test
+  public void testSslRequestWithClientAuthWantedInvalidDoesNotSetSslDnHeader() throws InterruptedException, IOException {
+    Context context = new Context();
+
+    context.put("bind", "0.0.0.0");
+    context.put("ssl", "true");
+    context.put("client-auth", "want");
+    context.put("keystore", RESOURCES_SERVER_SIGNED_ROOT_CA_KEY_P12);
+    context.put("keystore-password", KEYSTORE_PASSWORD);
+    context.put("keystore-type", "PKCS12");
+    context.put("truststore", RESOURCES_ROOT_CA_CERT_KEYSTORE);
+    context.put("truststore-password", KEYSTORE_PASSWORD);
+    prepareSslServer(context);
+
+    /** incorrect client auth supplied - "want" should still accept the connection */
+    AvroSourceProtocol client = SpecificRequestor.getClient(
+        AvroSourceProtocol.class, new NettyTransceiver(new InetSocketAddress(
+            selectedPort), new SSLChannelFactory(
+                RESOURCES_SERVER_SELF_SIGNED_KEYSTORE, KEYSTORE_PASSWORD, "JKS",
+                RESOURCES_ROOT_CA_CERT_KEYSTORE, KEYSTORE_PASSWORD, "JKS")));
+
+    Event event = doSslRequest(true, client);
+    Assert.assertNull(event.getHeaders().get("ssl-dn"));
   }
 
   private void prepareSslServer(Context context) throws InterruptedException {
@@ -442,7 +744,18 @@ public class TestAvroSource {
     }
   }
 
-  private void doSslRequest(boolean successExpected, AvroSourceProtocol client) throws InterruptedException, IOException {
+  private Event doSslRequest(boolean successExpected, AvroSourceProtocol client) throws InterruptedException, IOException {
+    ArrayList<AvroFlumeEvent> avroEvents = new ArrayList<AvroFlumeEvent>();
+    return doSslRequestList(successExpected, client, avroEvents).get(0);
+  }
+
+  private Event doSslRequest(boolean successExpected, AvroSourceProtocol client, AvroFlumeEvent avroEvent) throws InterruptedException, IOException {
+    ArrayList<AvroFlumeEvent> avroEvents = new ArrayList<AvroFlumeEvent>();
+    avroEvents.add(avroEvent);
+    return doSslRequestList(successExpected, client, avroEvents).get(0);
+  }
+
+  private List<Event> doSslRequestList(boolean successExpected, AvroSourceProtocol client, List<AvroFlumeEvent> avroEvents) throws InterruptedException, IOException {
     Assert
     .assertTrue("Reached start or error", LifecycleController.waitForOneOf(
         source, LifecycleState.START_OR_ERROR));
@@ -455,15 +768,23 @@ public class TestAvroSource {
               selectedPort), new SSLChannelFactory()));
     }
 
-    AvroFlumeEvent avroEvent = new AvroFlumeEvent();
-
-    avroEvent.setHeaders(new HashMap<CharSequence, CharSequence>());
-    avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
+    if (avroEvents == null || avroEvents.isEmpty()) {
+      avroEvents = new ArrayList<AvroFlumeEvent>();
+      AvroFlumeEvent avroEvent = new AvroFlumeEvent();
+      avroEvent.setHeaders(new HashMap<CharSequence, CharSequence>());
+      avroEvent.setBody(ByteBuffer.wrap("Hello avro ssl".getBytes()));
+      avroEvents.add(avroEvent);
+    }
 
     boolean sent = false;
     Status status = Status.UNKNOWN;
     try {
-      status = client.append(avroEvent);
+      if (avroEvents.size() == 1) {
+        status = client.append(avroEvents.get(0));
+      } else if (avroEvents.size() > 1) {
+        // send as a batch
+        status = client.appendBatch(avroEvents);
+      }
       sent = true;
     } catch (AvroRemoteException ex) {
       logger.info("Failed to send event", ex);
@@ -478,15 +799,22 @@ public class TestAvroSource {
     Transaction transaction = channel.getTransaction();
     transaction.begin();
 
-    Event event = channel.take();
-    if (successExpected) {
-      Assert.assertNotNull(event);
-      Assert.assertEquals("Channel contained our event", "Hello avro ssl",
-          new String(event.getBody()));
-      logger.debug("Round trip event:{}", event);
-    } else {
-      Assert.assertNull(event);
-    }
+    List<Event> events = new ArrayList<Event>();
+    Event event;
+    int count = 0;
+    do {
+      count++;
+      event = channel.take();
+      if (successExpected) {
+        Assert.assertNotNull(event);
+        Assert.assertEquals("Channel contained our event", "Hello avro ssl",
+            new String(event.getBody()));
+        logger.debug("Round trip event:{}", event);
+      } else {
+        Assert.assertNull(event);
+      }
+      events.add(event);
+    } while (event != null && count < avroEvents.size());
 
     transaction.commit();
     transaction.close();
@@ -500,6 +828,8 @@ public class TestAvroSource {
     if (!successExpected && sent) {
       Assert.fail("SSL-enabled source successfully accepted from client with an untrusted certificate when it should have failed");
     }
+
+    return events;
   }
   /**
    * Factory of SSL-enabled client channels
@@ -681,8 +1011,8 @@ public class TestAvroSource {
         if (testWithSSL) {
           logger.info("Client testWithSSL" + testWithSSL);
           context.put("ssl", "true");
-          context.put("keystore", "src/test/resources/server.p12");
-          context.put("keystore-password", "password");
+          context.put("keystore", RESOURCES_SERVER_SELF_SIGNED_KEY_P12);
+          context.put("keystore-password", KEYSTORE_PASSWORD);
           context.put("keystore-type", "PKCS12");
         }
 

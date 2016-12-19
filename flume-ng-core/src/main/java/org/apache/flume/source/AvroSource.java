@@ -25,6 +25,8 @@ import java.io.FileInputStream;
 import java.net.InetSocketAddress;
 import java.security.KeyStore;
 import java.security.Security;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -32,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 
@@ -41,6 +44,7 @@ import org.apache.avro.ipc.NettyTransceiver;
 import org.apache.avro.ipc.Responder;
 import org.apache.avro.ipc.Server;
 import org.apache.avro.ipc.specific.SpecificResponder;
+import org.apache.commons.lang.ArrayUtils;
 import org.apache.flume.Channel;
 import org.apache.flume.ChannelException;
 import org.apache.flume.Context;
@@ -145,6 +149,9 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
   private static final String TRUSTSTORE_TYPE_KEY = "truststore-type";
   private static final String CLIENTAUTH_KEY = "client-auth";
   private static final String EXCLUDE_PROTOCOLS = "exclude-protocols";
+
+  private static final String HEADER_SSL_DN = "ssl-dn";
+
   private int port;
   private String bindAddress;
   private String compressionType;
@@ -160,6 +167,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
   private boolean enableSsl = false;
   private boolean enableIpFilter;
   private String patternRuleConfigDefinition;
+  private SSLEngine sslEngine = null;
 
   private Server server;
   private SourceCounter sourceCounter;
@@ -369,7 +377,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
   }
 
   /**
-   * Helper function to convert a map of CharSequence to a map of String.
+   * Helper function to convert the map of CharSequence to a map of String.
    */
   private static Map<String, String> toStringMap(
       Map<CharSequence, CharSequence> charSeqMap) {
@@ -381,6 +389,22 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
     return stringMap;
   }
 
+  private Map<String, String> addSslDnHeader(Map<String, String> headerMap) {
+    headerMap.remove(HEADER_SSL_DN);
+    if (sslEngine == null) {
+      return headerMap;
+    }
+    try {
+      Certificate[] peerCertificates = sslEngine.getSession().getPeerCertificates();
+      if (!ArrayUtils.isEmpty(peerCertificates) && peerCertificates[0] != null && peerCertificates[0] instanceof X509Certificate) {
+        headerMap.put(HEADER_SSL_DN, ((X509Certificate)peerCertificates[0]).getSubjectDN().getName());
+      }
+    } catch (SSLPeerUnverifiedException e) {
+      // peer was not verified
+    }
+    return headerMap;
+  }
+
   @Override
   public Status append(AvroFlumeEvent avroEvent) {
     logger.debug("Avro source {}: Received avro event: {}", getName(),
@@ -389,7 +413,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
     sourceCounter.incrementEventReceivedCount();
 
     Event event = EventBuilder.withBody(avroEvent.getBody().array(),
-        toStringMap(avroEvent.getHeaders()));
+        addSslDnHeader(toStringMap(avroEvent.getHeaders())));
 
     try {
       getChannelProcessor().processEvent(event);
@@ -416,7 +440,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
 
     for (AvroFlumeEvent avroEvent : events) {
       Event event = EventBuilder.withBody(avroEvent.getBody().array(),
-          toStringMap(avroEvent.getHeaders()));
+          addSslDnHeader(toStringMap(avroEvent.getHeaders())));
 
       batch.add(event);
     }
@@ -568,7 +592,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
 
 
       if (enableSsl) {
-        SSLEngine sslEngine = createServerSSLContext().createSSLEngine();
+        sslEngine = createServerSSLContext().createSSLEngine();
         sslEngine.setUseClientMode(false);
         // these are 'mutually' set-able, so we only set the one we actually want
         if (wantClientAuth) {
