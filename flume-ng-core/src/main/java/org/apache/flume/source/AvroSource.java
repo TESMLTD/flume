@@ -26,6 +26,7 @@ import java.net.InetSocketAddress;
 import java.security.KeyStore;
 import java.security.Security;
 import java.security.cert.Certificate;
+import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.concurrent.Executors;
@@ -37,6 +38,7 @@ import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
+import javax.xml.bind.DatatypeConverter;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.avro.ipc.NettyServer;
@@ -151,6 +153,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
   private static final String EXCLUDE_PROTOCOLS = "exclude-protocols";
 
   private static final String HEADER_SSL_DN = "ssl-dn";
+  private static final String HEADER_SSL_CERT = "ssl-cert";
 
   private int port;
   private String bindAddress;
@@ -389,8 +392,9 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
     return stringMap;
   }
 
-  private Map<String, String> addSslDnHeader(Map<String, String> headerMap) {
+  private Map<String, String> addSslDnHeader(Map<String, String> headerMap, AvroFlumeEvent avroEvent) {
     headerMap.remove(HEADER_SSL_DN);
+    headerMap.remove(HEADER_SSL_CERT);
     if (sslEngine == null) {
       return headerMap;
     }
@@ -398,9 +402,13 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
       Certificate[] peerCertificates = sslEngine.getSession().getPeerCertificates();
       if (!ArrayUtils.isEmpty(peerCertificates) && peerCertificates[0] != null && peerCertificates[0] instanceof X509Certificate) {
         headerMap.put(HEADER_SSL_DN, ((X509Certificate)peerCertificates[0]).getSubjectDN().getName());
+        headerMap.put(HEADER_SSL_CERT, DatatypeConverter.printBase64Binary(((X509Certificate)peerCertificates[0]).getEncoded()));
       }
     } catch (SSLPeerUnverifiedException e) {
       // peer was not verified
+    } catch (CertificateEncodingException e) {
+      // certificate could not be encoded
+      logger.error("Avro source {}: Could not encode SSL Certificate for avro event: {}", getName(), avroEvent);
     }
     return headerMap;
   }
@@ -413,7 +421,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
     sourceCounter.incrementEventReceivedCount();
 
     Event event = EventBuilder.withBody(avroEvent.getBody().array(),
-        addSslDnHeader(toStringMap(avroEvent.getHeaders())));
+        addSslDnHeader(toStringMap(avroEvent.getHeaders()), avroEvent));
 
     try {
       getChannelProcessor().processEvent(event);
@@ -440,7 +448,7 @@ public class AvroSource extends AbstractSource implements EventDrivenSource,
 
     for (AvroFlumeEvent avroEvent : events) {
       Event event = EventBuilder.withBody(avroEvent.getBody().array(),
-          addSslDnHeader(toStringMap(avroEvent.getHeaders())));
+          addSslDnHeader(toStringMap(avroEvent.getHeaders()), avroEvent));
 
       batch.add(event);
     }
