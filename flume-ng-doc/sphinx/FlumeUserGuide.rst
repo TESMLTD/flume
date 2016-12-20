@@ -730,6 +730,10 @@ ssl                  false             Set this to true to enable SSL encryption
 keystore             --                This is the path to a Java keystore file. Required for SSL.
 keystore-password    --                The password for the Java keystore. Required for SSL.
 keystore-type        JKS               The type of the Java keystore. This can be "JKS" or "PKCS12".
+clientauth           none              Set this to "want", or "need", to enable SSL client authentication. You must also specify a "truststore" and a "truststore-password". If "want" is selected, then connection will not be rejected if SSL Client authentication fails, but will be recorded if it worked (see "ssl-dn", below.). If "need" is set, and a non-trusted certificate is presented by the client, then the connection will be dropped.
+truststore           --                This is the path to a custom Java truststore file. Flume uses the information in this file to determine whether the remote Avro Sink's SSL credentials (aka client authentication), will be accepted. This must be specified, if "client-auth" is set to 'want' or 'need'.
+truststore-password  --                The password for the Java truststore. Required when a "truststore" is specified.
+truststore-type      JKS               The type of the Java truststore file. This can be "JKS" or "PKCS12".
 exclude-protocols    SSLv3             Space-separated list of SSL/TLS protocols to exclude. SSLv3 will always be excluded in addition to the protocols specified.
 ipFilter             false             Set this to true to enable ipFiltering for netty
 ipFilterRules        --                Define N netty ipFilter pattern rules with this config.
@@ -760,6 +764,25 @@ Note that the first rule to match will apply as the example below shows from a c
 
 This will Allow the client on localhost be deny clients from any other ip "allow:name:localhost,deny:ip:*"
 This will deny the client on localhost be allow clients from any other ip "deny:name:localhost,allow:ip:*"
+
+SSL Client Authentication
+
+If "client-auth" is set to 'want' or 'need', and the client (Sink)
+authenticates with an SSL certificate that is acceptable (signed by a
+CA in the "truststore-file"), then the Avro Source will set two
+headers in the Flume event.
+
+==================   ===========  ===================================================
+Header Name          Default      Description
+==================   ===========  ===================================================
+ssl-dn               --           The "Distinguished name" of the authenticated client SSL Certificate. (the format returned by X509Certificate.getSubjectDN().getName())
+ssl-cert             --           The authenticated client SSL Certificate, in binary DER format encoded with base-64.
+
+If "client-auth" is set to 'none' (or not present), or with 'want'
+the client presents an SSL certificate that is not trusted, then the
+Avro Source will not set these two headers and will remove them if
+they were present in the received event.
+
 
 Thrift Source
 ~~~~~~~~~~~~~
